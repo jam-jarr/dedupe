@@ -1,11 +1,11 @@
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+#include "hash_functions.h"
 #include <assert.h>
 #include <pthread.h>
-#include "hash_functions.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-#define NUM_WORKERS 11 // Total threads: 11 workers + 1 main = 12 [3]
+#define NUM_WORKERS 11   // Total threads: 11 workers + 1 main = 12 [3]
 #define TABLE_SIZE 32768 // Power of 2 for efficient indexing
 
 // Simple Hash Table to store unique hash occurrences
@@ -24,7 +24,8 @@ typedef struct {
 void *hash_worker(void *arg) {
     HashArgs *a = (HashArgs *)arg;
     for (int i = a->start; i < a->end; i++) {
-        a->hashes[i] = calculate_sha512((unsigned char *)a->bufs[i], a->chunk_size);
+        a->hashes[i] =
+            calculate_sha512((unsigned char *)a->bufs[i], a->chunk_size);
     }
     return NULL;
 }
@@ -32,7 +33,7 @@ void *hash_worker(void *arg) {
 void dedupe(char *filename, int chunk_size, char *output) {
     FILE *fp = fopen(filename, "r");
     assert(fp != NULL);
-    
+
     // 1. Determine file size and pre-allocate [Query]
     fseek(fp, 0, SEEK_END);
     long file_size = ftell(fp);
@@ -60,7 +61,8 @@ void dedupe(char *filename, int chunk_size, char *output) {
 
     for (int t = 0; t < NUM_WORKERS; t++) {
         hargs[t].start = t * per_thread;
-        hargs[t].end = (t + 1) * per_thread < n_hashes ? (t + 1) * per_thread : n_hashes;
+        hargs[t].end =
+            (t + 1) * per_thread < n_hashes ? (t + 1) * per_thread : n_hashes;
         hargs[t].chunk_size = chunk_size;
         hargs[t].bufs = bufs;
         hargs[t].hashes = hashes;
@@ -73,14 +75,19 @@ void dedupe(char *filename, int chunk_size, char *output) {
         pthread_join(threads[t], NULL);
     }
 
+    free(chunk_data);
+    free(bufs);
+
     // 3. Duplicate Detection via O(N) Hash Table
     Node **table = calloc(TABLE_SIZE, sizeof(Node *));
     int hash_size = size_sha512();
 
     for (int i = 0; i < n_hashes; i++) {
         // Use the first 8 bytes of the hash as a bucket index
-        unsigned long bucket = (*(unsigned long *)hashes[i]) % TABLE_SIZE;
-        
+        unsigned long bucket;
+        memcpy(&bucket, hashes[i], sizeof(bucket));
+        bucket %= TABLE_SIZE;
+
         Node *curr = table[bucket];
         int is_duplicate = 0;
         while (curr) {
@@ -88,6 +95,7 @@ void dedupe(char *filename, int chunk_size, char *output) {
                 is_duplicate = 1;
                 break;
             }
+            printf("bucket collision %lu\n", bucket);
             curr = curr->next;
         }
 
@@ -106,13 +114,12 @@ void dedupe(char *filename, int chunk_size, char *output) {
     // 4. Output Results
     fp = fopen(output, "w");
     assert(fp != NULL);
-    for (int i = 0; i < n_hashes; i++) fprintf(fp, "%d", mask[i]);
+    for (int i = 0; i < n_hashes; i++)
+        fprintf(fp, "%d", mask[i]);
     fprintf(fp, "\n");
     fclose(fp);
 
     // 5. Clean up [5, 9]
-    free(chunk_data);
-    free(bufs);
     free(mask);
     for (int i = 0; i < TABLE_SIZE; i++) {
         Node *curr = table[i];
@@ -123,6 +130,8 @@ void dedupe(char *filename, int chunk_size, char *output) {
         }
     }
     free(table);
-    for (int i = 0; i < n_hashes; i++) if (hashes[i]) free(hashes[i]);
+    for (int i = 0; i < n_hashes; i++)
+        if (hashes[i])
+            free(hashes[i]);
     free(hashes);
 }
