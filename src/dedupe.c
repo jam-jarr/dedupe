@@ -5,14 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define NUM_WORKERS 11   // Total threads: 11 workers + 1 main = 12 [3]
-#define TABLE_SIZE 32768 // Power of 2 for efficient indexing
-
-// Simple Hash Table to store unique hash occurrences
-typedef struct Node {
-    unsigned char *hash;
-    struct Node *next;
-} Node;
+#define NUM_WORKERS 11 // Total threads: 11 workers + 1 main = 12 [3]
 
 typedef struct {
     int start, end, chunk_size;
@@ -51,7 +44,9 @@ void dedupe(char *filename, int chunk_size, char *output) {
         bufs[i] = chunk_data + (long)i * chunk_size;
 
     // Read all data at once to maximize I/O utilization [6]
-    fread(chunk_data, chunk_size, n_hashes, fp);
+    size_t items_read = fread(chunk_data, chunk_size, n_hashes, fp);
+    if (items_read < n_hashes)
+        n_hashes = items_read;
     fclose(fp);
 
     // 2. Parallel Hashing Phase
@@ -78,60 +73,45 @@ void dedupe(char *filename, int chunk_size, char *output) {
     free(chunk_data);
     free(bufs);
 
-    // 3. Duplicate Detection via O(N) Hash Table
-    Node **table = calloc(TABLE_SIZE, sizeof(Node *));
+    // 3. Duplicate Detection via Linear Probing
     int hash_size = size_sha512();
+    int table_size = 1;
+    while (table_size < 2 * n_hashes)
+        table_size *= 2;
+
+    unsigned char **table = calloc(table_size, sizeof(unsigned char *));
+    assert(table);
 
     for (int i = 0; i < n_hashes; i++) {
-        // Use the first 8 bytes of the hash as a bucket index
         unsigned long bucket;
         memcpy(&bucket, hashes[i], sizeof(bucket));
-        bucket %= TABLE_SIZE;
+        bucket %= table_size;
 
-        Node *curr = table[bucket];
-        int is_duplicate = 0;
-        while (curr) {
-            if (memcmp(hashes[i], curr->hash, hash_size) == 0) {
-                is_duplicate = 1;
+        while (table[bucket]) {
+            if (memcmp(hashes[i], table[bucket], hash_size) == 0) {
+                mask[i] = 1;
                 break;
             }
-            printf("bucket collision %lu\n", bucket);
-            curr = curr->next;
+            bucket = (bucket + 1) & (table_size - 1);
         }
-
-        if (is_duplicate) {
-            mask[i] = 1; // Mark as duplicate [2]
-        } else {
-            // New unique chunk: insert into table
-            Node *new_node = malloc(sizeof(Node));
-            assert(new_node != NULL);
-            new_node->hash = hashes[i];
-            new_node->next = table[bucket];
-            table[bucket] = new_node;
+        if (!table[bucket]) {
+            table[bucket] = hashes[i];
         }
     }
+
+    free(table);
 
     // 4. Output Results
+    // Buffer output to reduce write calls to the OS
     fp = fopen(output, "w");
     assert(fp != NULL);
+    char *out_buf = malloc(n_hashes + 1);
+    assert(out_buf);
     for (int i = 0; i < n_hashes; i++)
-        fprintf(fp, "%d", mask[i]);
-    fprintf(fp, "\n");
+        out_buf[i] = mask[i] ? '1' : '0';
+    out_buf[n_hashes] = '\n';
+    fwrite(out_buf, 1, n_hashes + 1, fp);
     fclose(fp);
-
-    // 5. Clean up [5, 9]
-    free(mask);
-    for (int i = 0; i < TABLE_SIZE; i++) {
-        Node *curr = table[i];
-        while (curr) {
-            Node *tmp = curr;
-            curr = curr->next;
-            free(tmp); // Free nodes, but hashes[i] is freed below
-        }
-    }
-    free(table);
-    for (int i = 0; i < n_hashes; i++)
-        if (hashes[i])
-            free(hashes[i]);
-    free(hashes);
+    // no need to free anything past this point
+    // the OS will do it for us, and probably faster (less interrupts)
 }
